@@ -2444,8 +2444,23 @@ private:
     }
 
     // n_tokens_cur: the number of tokens added to the batch for the current slot
-    void create_checkpoint(server_slot & slot, const int64_t n_tokens_cur, llama_pos pos_min, llama_pos pos_max) {
+    // supersede_prev: erase the checkpoints of previous tasks within min-step before the new one
+    void create_checkpoint(server_slot & slot, const int64_t n_tokens_cur, llama_pos pos_min, llama_pos pos_max, bool supersede_prev = false) {
         const int id_task = slot.task->id;
+
+        if (supersede_prev) {
+            const int64_t n_tokens_new = slot.prompt.n_tokens() - n_tokens_cur;
+            for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end(); ) {
+                if (it->id_task != id_task && it->n_tokens < n_tokens_new && it->n_tokens + params_base.checkpoint_min_step >= n_tokens_new) {
+                    SLT_TRC(slot, "erasing context checkpoint superseded by a later one (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
+                            it->pos_min, it->pos_max, it->n_tokens, (float) it->size() / 1024 / 1024);
+
+                    it = slot.prompt.checkpoints.erase(it);
+                    continue;
+                }
+                ++it;
+            }
+        }
 
         // evict checkpoints within min-step of a previous checkpoint, unless they were
         // created by the current task
@@ -3960,7 +3975,9 @@ private:
                     // note: we create the checkpoint before calling llama_decode(), so the current batch is not
                     //       yet processed and therefore it is not part of the checkpoint.
                     if (do_checkpoint) {
-                        create_checkpoint(slot, n_tokens_cur, pos_min, pos_max);
+                        // a checkpoint at the end of the last user message is created on every turn and is never
+                        // invalidated by the next one: let it replace the earlier ones instead of accumulating
+                        create_checkpoint(slot, n_tokens_cur, pos_min, pos_max, is_last_user_end);
                     }
                 }
 
